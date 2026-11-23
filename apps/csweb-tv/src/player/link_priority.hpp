@@ -31,6 +31,9 @@ bool is_4k(const runtime::Link &link);
 bool is_1080p(const runtime::Link &link);
 bool is_720p(const runtime::Link &link);
 bool is_hdr(const runtime::Link &link);
+bool is_cam(const runtime::Link &link);
+// Best quality integer for a link, using name-based detection as fallback when quality==400.
+int quality_from_name(const runtime::Link &link);
 
 struct VideoQualityInfo {
     std::string resolution;

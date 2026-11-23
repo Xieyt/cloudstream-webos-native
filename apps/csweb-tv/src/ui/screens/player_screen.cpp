@@ -250,6 +250,39 @@ void PlayerScreen::links_changed() {
     if (!started_ && auto_skip) {
         if (Ui *u = this->ui()) start_best(*u);
     }
+    // Start a background HEAD check for the newest link so results are ready when Sources opens.
+    if (!links_.empty()) check_reachability(links_.size() - 1);
+}
+
+void PlayerScreen::check_reachability(size_t i) {
+    if (!s_.http || i >= links_.size()) return;
+    if (link_reachable_.count(i)) return;  // already checked or in-progress
+    link_reachable_[i] = -1;               // mark in-progress
+    const runtime::Link &l = links_[i];
+    // Torrents/magnets: no HTTP probe possible — leave neutral
+    if (player::is_torrent(l)) { link_reachable_.erase(i); return; }
+    if (!player::playable(l)) { link_reachable_[i] = 0; return; }
+    wnk::net::HttpRequest req;
+    req.url = core::canonical_http_url(l.url);
+    // Range GET instead of HEAD — many video CDNs reject HEAD (405) while GET works;
+    // also catches token-authenticated URLs better than HEAD.
+    req.method = "GET";
+    req.timeout_ms = 6000;
+    req.max_response_bytes = 1;  // only need the first byte
+    req.headers.emplace_back("Range", "bytes=0-0");
+    for (const auto &[k, v] : player::link_headers(l))
+        req.headers.emplace_back(k, v);
+    (void)s_.http->send(req, {}, life_.weak(), [this, i](wnk::net::HttpResponse res) {
+        // 200 / 206 (range) = reachable
+        // 403 / 405 / timeout = ambiguous CDN rejection — leave neutral (don't penalise)
+        if (res.ok() || res.status == 206) {
+            link_reachable_[i] = 1;
+        } else if (res.status == 403 || res.status == 405 || res.status == 0) {
+            link_reachable_.erase(i);  // neutral — can't tell
+        } else {
+            link_reachable_[i] = 0;  // 404, 410, 5xx etc. = likely dead
+        }
+    });
 }
 
 void PlayerScreen::start_best(Ui &ui) {
@@ -517,9 +550,16 @@ std::string PlayerScreen::link_label(const runtime::Link &l) const {
     std::string label = l.name.empty() ? l.source : l.name;
     std::string q = runtime::quality_label(l.quality);
     if (q.empty()) {
-        if (player::is_4k(l)) q = "4K";
-        else if (player::is_1080p(l)) q = "1080p";
-        else if (player::is_720p(l)) q = "720p";
+        // quality_from_name: case-insensitive; detects CAM/SD/720/1080/4K from name, source, url
+        const int qn = player::quality_from_name(l);
+        if (player::is_cam(l))         q = "CAM";
+        else if (qn == 2160)           q = "4K";
+        else if (qn == 1440)           q = "1440p";
+        else if (qn == 1080)           q = "1080p";
+        else if (qn == 720)            q = "720p";
+        else if (qn == 480)            q = "SD";
+        else if (qn == 360)            q = "360p";
+        else if (qn > 0 && qn != 400)  q = std::to_string(qn) + "p";
     }
     if (!q.empty()) label += "  ·  " + q;
     if (player::is_dolby_vision(l)) label += "  ·  DV";
@@ -721,26 +761,88 @@ void PlayerScreen::update(Ui &ui, float dt) {
 void PlayerScreen::open_sources(Ui &ui) {
     auto d = std::make_unique<GlassDialog>("Sources", loading_ ? "Still loading links…" : std::string());
     Dialog *dlg = d.get();
+
+    // ── Quality filter chips ──────────────────────────────────────────────────
+    auto &frow = d->body().add<Row>(8);
+    struct FilterChip { const char *label; int min_q; };
+    for (auto [label, min_q] : {FilterChip{"All", 0}, {"720p+", 720}, {"1080p+", 1080}, {"4K", 2160}}) {
+        int mq = min_q;
+        frow.add<PillButton>(label,
+                             quality_filter_ == min_q ? "check" : "",
+                             PillButton::Style::Glass,
+                             [this, dlg, mq](Ui &u) { dlg->dismiss(u); quality_filter_ = mq; open_sources(u); },
+                             44);
+    }
+
+    // ── Link list ─────────────────────────────────────────────────────────────
     auto &scroll = d->body().add<ScrollView>();
-    scroll.set_height(Dim::fixed(560));
+    scroll.set_height(Dim::fixed(500));  // shorter to fit filter row above
     auto &list = scroll.add<Column>(8);
     View *current = nullptr;
+    int shown = 0;
+
     for (size_t i : player::sort_links(links_, link_preferences())) {
         const auto &l = links_[i];
+
+        // Quality filter — use name-based detection (is_4k/is_1080p/is_720p check
+        // link.name, .source and .url) so providers that embed quality in the name
+        // string rather than the quality int are handled correctly.
+        // Links with truly undetectable quality (quality==400 AND no name hint) are
+        // always shown — the user can judge from the source name.
+        if (quality_filter_ > 0) {
+            const bool is4k   = player::is_4k(l);
+            const bool is1080 = !is4k && player::is_1080p(l);
+            const bool is720  = !is4k && !is1080 && player::is_720p(l);
+            // Explicit quality int takes precedence when it's meaningful
+            const int q = (l.quality > 0 && l.quality != 400) ? l.quality : 0;
+            bool passes;
+            if (quality_filter_ >= 2160)      passes = is4k || q >= 2160;
+            else if (quality_filter_ >= 1080) passes = is4k || is1080 || q >= 1080;
+            else                              passes = is4k || is1080 || is720 || q >= 720;
+            // Truly unknown quality (400 or 0, no name hint) → always show
+            const bool unknown = !is4k && !is1080 && !is720 && q == 0;
+            if (!passes && !unknown) continue;
+        }
+
+        ++shown;
         std::string text = link_label(l);
-        if (!player::playable(l)) text += "  ·  not supported (" + player::unsupported_reason(l) + ")";
-        else if (errored_.count(i)) text += "  ·  failed";
-        auto &b = list.add<PillButton>(text, i == current_ ? "check" : "", PillButton::Style::Glass, [this, dlg, i](Ui &u) {
-            dlg->dismiss(u);
-            if (player::playable(links_[i])) {
-                errored_.erase(i);
-                started_ = true;
-                play_link(u, i);
+        if (!player::playable(l)) {
+            text += "  ·  not supported (" + player::unsupported_reason(l) + ")";
+        } else if (errored_.count(i)) {
+            text += "  ·  failed";
+        } else {
+            // Reachability indicator
+            auto it = link_reachable_.find(i);
+            if (it == link_reachable_.end() || it->second == -1) {
+                text += "  ·  …";          // in-progress or unchecked
+                check_reachability(i);     // idempotent — won't double-check
+            } else if (it->second > 0) {
+                text += "  ·  ✓";
+            } else {
+                text += "  ·  ✗ unreachable";
             }
-        }, 60);
+        }
+
+        auto &b = list.add<PillButton>(text, i == current_ ? "check" : "", PillButton::Style::Glass,
+                                       [this, dlg, i](Ui &u) {
+                                           dlg->dismiss(u);
+                                           if (player::playable(links_[i])) {
+                                               errored_.erase(i);
+                                               started_ = true;
+                                               play_link(u, i);
+                                           }
+                                       }, 60);
         b.name = "sources." + std::to_string(i);
         if (i == current_) current = &b;
     }
+
+    if (shown == 0 && !links_.empty()) {
+        list.add<PillButton>("No sources at selected quality — tap All to show all",
+                             "", PillButton::Style::Glass,
+                             [this, dlg](Ui &u) { dlg->dismiss(u); quality_filter_ = 0; open_sources(u); },
+                             60);
+    }
+
     d->add_button("Close");
     ui.show_dialog(std::move(d));
     if (current) ui.focus(current);
@@ -948,16 +1050,41 @@ void PlayerScreen::open_episodes(Ui &ui) {
     scroll.set_width(Dim::fixed(GlassDialog::kContentWidth)).set_height(Dim::fixed(600));
     auto &list = scroll.add<Column>(8);
     View *current = nullptr;
+
+    // Group by season; season==0 means no season info (flat list)
+    int last_season = -999;
+    bool has_seasons = false;
+    for (const auto &e : target_.episodes)
+        if (e.season != 0) { has_seasons = true; break; }
+
     for (size_t i = 0; i < target_.episodes.size(); i++) {
         const auto &e = target_.episodes[i];
         const auto p = s_.library->get().view_pos(target_.provider, e.data);
         const int pct = p && p->duration_ms > 0 ? static_cast<int>(library::visual_progress(*p) * 100) : 0;
-        // A long title ends in an ellipsis inside the panel; the progress after it stays whole.
-        auto &b = list.add<PillButton>(e.name, i == target_.index ? "play" : "", PillButton::Style::Glass, [this, dlg, i](Ui &u) {
-            dlg->dismiss(u);
-            if (i != target_.index) play_episode(u, i);
-        }, 60);
-        if (pct > 0) b.set_suffix("  ·  " + std::to_string(pct) + " %");
+
+        // Season header
+        if (has_seasons && e.season != last_season) {
+            last_season = e.season;
+            const std::string season_label = e.season > 0 ? "Season " + std::to_string(e.season) : "Episodes";
+            // Separator pill with no click handler, different style for visibility
+            auto &sep = list.add<PillButton>(season_label, "", PillButton::Style::Ghost,
+                                             [](Ui &) {}, 36);
+            sep.name = "episodes.season." + std::to_string(e.season);
+        }
+
+        // e.name is already formatted as "S1 · E3 Title" by the provider — use it as-is.
+        // Season headers above give grouping context; no prefix needed.
+        const std::string &label = e.name;
+
+        auto &b = list.add<PillButton>(label, i == target_.index ? "play" : "", PillButton::Style::Glass,
+                                       [this, dlg, i](Ui &u) {
+                                           dlg->dismiss(u);
+                                           if (i != target_.index) play_episode(u, i);
+                                       }, 60);
+        // Show watch progress and runtime as suffix
+        std::string suffix;
+        if (pct > 0) suffix += std::to_string(pct) + "%";
+        if (!suffix.empty()) b.set_suffix("  ·  " + suffix);
         b.name = "episodes." + std::to_string(i);
         if (i == target_.index) current = &b;
     }

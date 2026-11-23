@@ -103,11 +103,12 @@ bool is_1080p(const runtime::Link &link) {
         if (s.empty()) return false;
         if (contains_ci(s, "1080p") || contains_word_ci(s, "1080")) return true;
         if (contains_word_ci(s, "fhd") || contains_ci(s, "full hd") || contains_ci(s, "fullhd")) return true;
+        // "[1080]" bracket notation used by some CDN hosters
+        if (s.find("[1080]") != std::string::npos) return true;
         return false;
     };
     return match(link.name) || match(link.source) || match(link.url);
 }
-
 bool is_720p(const runtime::Link &link) {
     if (link.quality == 720) return true;
     if (is_4k(link) || is_1080p(link)) return false;
@@ -115,12 +116,14 @@ bool is_720p(const runtime::Link &link) {
     auto match = [](const std::string &s) {
         if (s.empty()) return false;
         if (contains_ci(s, "720p") || contains_word_ci(s, "720")) return true;
+        // HD without Full/Ultra prefix ≈ 720p (conservative)
         if (contains_word_ci(s, "hd") && !contains_ci(s, "full hd") && !contains_ci(s, "ultra hd")) return true;
+        // "[720]" bracket notation
+        if (s.find("[720]") != std::string::npos) return true;
         return false;
     };
     return match(link.name) || match(link.source) || match(link.url);
 }
-
 bool is_hdr(const runtime::Link &link) {
     auto match = [](const std::string &s) {
         if (s.empty()) return false;
@@ -129,6 +132,35 @@ bool is_hdr(const runtime::Link &link) {
         return false;
     };
     return match(link.name) || match(link.source) || match(link.url);
+}
+
+// CAM / HDCAM / HDTS / TS / TC rips — essentially unwatchable quality
+bool is_cam(const runtime::Link &link) {
+    auto match = [](const std::string &s) {
+        if (s.empty()) return false;
+        // Standalone CAM or CAMRIP
+        if (contains_word_ci(s, "camrip") || contains_word_ci(s, "cam")) return true;
+        // HDCAM / HDTS / HDTC variants
+        if (contains_word_ci(s, "hdcam") || contains_word_ci(s, "hdts") || contains_word_ci(s, "hdtc")) return true;
+        // Telesync / Telecine
+        if (contains_word_ci(s, "telesync") || contains_word_ci(s, "telecine")) return true;
+        return false;
+    };
+    return match(link.name) || match(link.source);
+}
+
+// Effective quality integer from name heuristics (falls back to link.quality).
+// Returned value follows Qualities convention (400 = unknown, 0 = auto).
+int quality_from_name(const runtime::Link &link) {
+    if (link.quality > 0 && link.quality != 400) return link.quality;
+    if (is_4k(link))   return 2160;
+    if (is_1080p(link)) return 1080;
+    if (is_720p(link))  return 720;
+    if (is_cam(link))   return 0;   // treat cam as unplayable quality
+    // SD keyword → 480
+    auto sd = [](const std::string &s) { return !s.empty() && contains_word_ci(s, "sd"); };
+    if (sd(link.name) || sd(link.source)) return 480;
+    return link.quality;  // 400 (truly unknown)
 }
 
 VideoQualityInfo detect_quality_info(const runtime::Link &link,

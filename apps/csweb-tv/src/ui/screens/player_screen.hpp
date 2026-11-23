@@ -30,8 +30,8 @@
 #include "wnk/ui/navigation.hpp"
 
 #include <memory>
-#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace csweb::ui {
@@ -85,6 +85,7 @@ class PlayerScreen : public wnk::ui::Screen {
     void save_position();
     void play_next(wnk::ui::Ui &ui);
     void play_episode(wnk::ui::Ui &ui, size_t index);
+    void check_reachability(size_t i);  // async range-GET probe; updates link_reachable_[i]
     void open_episodes(wnk::ui::Ui &ui);
     std::string link_label(const runtime::Link &l) const;
     player::LinkPreferences link_preferences() const;
@@ -154,6 +155,10 @@ class PlayerScreen : public wnk::ui::Screen {
     wnk::ui::Label *torrent_info_ = nullptr;
     double torrent_polled_ms_ = 0;
     bool torrent_polling_ = false;
+    // Quality filter: 0 = all, else minimum quality value (720, 1080, 2160)
+    int quality_filter_ = 0;
+    // Reachability: index → 1 (ok), 0 (dead), -1 (in-progress). Absent = unchecked.
+    std::unordered_map<size_t, int8_t> link_reachable_;
 };
 
 }  // namespace csweb::ui
