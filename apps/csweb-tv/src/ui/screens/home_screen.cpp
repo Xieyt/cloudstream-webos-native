@@ -418,13 +418,19 @@ void HomeScreen::load(Ui &ui, const std::string &provider) {
             return;
         }
         set_state_text("Loading all sources…", StateAction::None);
+        // Round-robin over providers, first kAllSections sections of each, so every source shows
+        // something early instead of one provider's 25 sections hogging the queue.
+        constexpr size_t kAllSections = 4;
+        std::vector<std::pair<std::string, size_t>> srcs;  // provider, section count
         for (const auto &entry : valid) {
             const runtime::Provider *pp = s_.plugins->provider(entry.name);
             if (!pp || !pp->has_main_page || pp->main_page.empty()) continue;
             WNK_LOGI(kCat, "home/all: %s, %zu sections", entry.name.c_str(), pp->main_page.size());
-            for (size_t i = 0; i < pp->main_page.size(); i++)
-                pending_.push_back({entry.name, static_cast<int>(i), now});
+            srcs.emplace_back(entry.name, std::min(pp->main_page.size(), kAllSections));
         }
+        for (size_t k = 0; k < kAllSections; k++)
+            for (const auto &[name, n] : srcs)
+                if (k < n) pending_.push_back({name, static_cast<int>(k), now});
     } else {
         const runtime::Provider *p = s_.plugins->provider(provider);
         if (!p || !p->has_main_page || p->main_page.empty()) {
@@ -444,7 +450,10 @@ void HomeScreen::update(Ui &ui, float dt) {
     Screen::update(ui, dt);
     const runtime::Provider *p = (provider_.empty() || all_mode_) ? nullptr : s_.plugins->provider(provider_);
     const bool sequential = p && p->sequential_main_page;
-    while (!pending_.empty() && pending_.front().not_before_ms <= ui.now_ms() && (!sequential || requests_.empty())) {
+    // ★ All fires many providers' sections: keep at most 3 in flight so the TV's network stack and
+    // CPU are not swamped (a burst of ~300 requests crashed the bundled libcurl).
+    while (!pending_.empty() && pending_.front().not_before_ms <= ui.now_ms() &&
+           (!all_mode_ || requests_.size() < 3) && (!sequential || requests_.empty())) {
         const std::string sec_prov = pending_.front().provider;
         const int index = pending_.front().index;
         pending_.pop_front();
