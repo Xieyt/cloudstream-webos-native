@@ -29,10 +29,39 @@ using settings::kRandomProvider;
 
 namespace {
 constexpr const char *kCat = "csweb";
+constexpr const char *kAllProvider = "__all__";   // virtual "All providers" source
 const wnk::Size kPosterCell{theme::kPosterW, theme::kPosterH + 56};
 const wnk::Size kStillCell{theme::kStillW, theme::kStillH + 56};
-constexpr float kBannerH = 760;   // the featured banner, under the top bar
-constexpr float kTopClear = 200;  // the top bar's height plus a gap, when there is no banner
+constexpr float kBannerH = 760;
+constexpr float kTopClear = 200;
+
+// Map SearchResult.quality string → short display badge ("HD", "4K", "CAM", …)
+std::string quality_display(const std::string &q) {
+    if (q.empty()) return {};
+    // Try numeric (SearchQuality enum value as string)
+    // 15/16=4K, 9/10/11/12/13=HD, 8/14=SD, 0-7=CAM-ish
+    char *end = nullptr;
+    long v = std::strtol(q.c_str(), &end, 10);
+    if (end && *end == '\0') {
+        if (v >= 15) return "4K";
+        if (v >= 8)  return "HD";
+        if (v > 0)   return "CAM";
+        return {};
+    }
+    // String form: compare case-insensitively
+    std::string lq = q;
+    for (auto &c : lq) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lq == "fourk" || lq == "4k" || lq == "uhd") return "4K";
+    if (lq == "hdr")                                  return "HDR";
+    if (lq == "fhd" || lq == "fullhd")               return "FHD";
+    if (lq == "hd" || lq == "hdrip" || lq == "webrip" ||
+        lq == "webdl" || lq == "bluray" || lq == "bluerayremux") return "HD";
+    if (lq == "sd" || lq == "dvd")                   return "SD";
+    if (lq == "cam" || lq == "camrip" || lq == "hdcam" ||
+        lq == "hdts" || lq == "ts" || lq == "hdtc" || lq == "tc" ||
+        lq == "telesync" || lq == "telecine")        return "CAM";
+    return {};  // unknown — don't show
+}
 }  // namespace
 
 HomeScreen::HomeScreen(app::Services &s) : Screen("Home"), s_(s) {
@@ -133,6 +162,20 @@ HomeScreen::HomeScreen(app::Services &s) : Screen("Home"), s_(s) {
         if (s_.router->nav().top() == this) u->focus(top_->current_tab());
     });
     rebuild_resume();
+
+    // Type filter chips (All / Movie / Series / Anime / Live) — fixed above the content rows
+    type_chips_row_ = &content_->add<wnk::ui::Row>(8);
+    type_chips_row_->set_padding({0, 0, 0, 4});
+    struct Chip { const char *label; const char *type; };
+    for (auto [label, type] : {Chip{"All", ""}, {"🎬 Movies", "Movie"}, {"📺 Series", "TvSeries"},
+                                {"🎌 Anime", "Anime"}, {"📡 Live", "Live"}}) {
+        const char *t = type;
+        auto &btn = type_chips_row_->add<PillButton>(label,
+            type_filter_ == std::string(t) ? "check" : "",
+            PillButton::Style::Glass,
+            [this, t](Ui &u) { set_type_filter(u, t); }, 44);
+        btn.name = std::string("home.filter.") + (t[0] ? t : "all");
+    }
 
     rows_box_ = &content_->add<Column>(26);
 
@@ -277,36 +320,54 @@ void HomeScreen::load(Ui &ui, const std::string &provider) {
     set_banner(false);
     backdrop_->set_url({});
     provider_ = provider;
-    provider_button_->set_text(provider.empty() ? "Source: none" : provider);
+    all_mode_ = (provider == kAllProvider);
+    provider_button_->set_text(all_mode_ ? "★ All" : (provider.empty() ? "Source: none" : provider));
     if (provider.empty()) {
         set_state_text("Choose the source shown here, or use Search.", StateAction::ChooseSource);
         return;
     }
-    const runtime::Provider *p = s_.plugins->provider(provider);
-    if (!p || !p->has_main_page || p->main_page.empty()) {
-        set_state_text(provider + " has no home page. Choose another source, or use Search.", StateAction::ChooseSource);
-        return;
-    }
-    set_state_text("Loading " + provider + "…", StateAction::None);
-    WNK_LOGI(kCat, "home: %s, %zu sections%s", provider.c_str(), p->main_page.size(), p->sequential_main_page ? " (sequential)" : "");
     const double now = ui.now_ms();
     requested_ms_ = now;
     first_row_logged_ = false;
-    for (size_t i = 0; i < p->main_page.size(); i++) {
-        const double at = p->sequential_main_page ? now + double(i) * double(p->sequential_delay_ms) : now;
-        pending_.push_back({static_cast<int>(i), at});
+    if (all_mode_) {
+        // "All Providers" — queue sections for every loaded provider
+        const auto valid = settings::preferred_providers(s_.plugins->providers(), settings::read_filters(*s_.settings), true);
+        if (valid.empty()) {
+            set_state_text("No sources available. Install providers first.", StateAction::Extensions);
+            return;
+        }
+        set_state_text("Loading all sources…", StateAction::None);
+        for (const auto &entry : valid) {
+            const runtime::Provider *pp = s_.plugins->provider(entry.name);
+            if (!pp || !pp->has_main_page || pp->main_page.empty()) continue;
+            WNK_LOGI(kCat, "home/all: %s, %zu sections", entry.name.c_str(), pp->main_page.size());
+            for (size_t i = 0; i < pp->main_page.size(); i++)
+                pending_.push_back({entry.name, static_cast<int>(i), now});
+        }
+    } else {
+        const runtime::Provider *p = s_.plugins->provider(provider);
+        if (!p || !p->has_main_page || p->main_page.empty()) {
+            set_state_text(provider + " has no home page. Choose another source, or use Search.", StateAction::ChooseSource);
+            return;
+        }
+        set_state_text("Loading " + provider + "…", StateAction::None);
+        WNK_LOGI(kCat, "home: %s, %zu sections%s", provider.c_str(), p->main_page.size(), p->sequential_main_page ? " (sequential)" : "");
+        for (size_t i = 0; i < p->main_page.size(); i++) {
+            const double at = p->sequential_main_page ? now + double(i) * double(p->sequential_delay_ms) : now;
+            pending_.push_back({provider, static_cast<int>(i), at});
+        }
     }
-    // Sequential providers: one section at a time (the next is scheduled when the previous ends).
 }
 
 void HomeScreen::update(Ui &ui, float dt) {
     Screen::update(ui, dt);
-    const runtime::Provider *p = provider_.empty() ? nullptr : s_.plugins->provider(provider_);
+    const runtime::Provider *p = (provider_.empty() || all_mode_) ? nullptr : s_.plugins->provider(provider_);
     const bool sequential = p && p->sequential_main_page;
     while (!pending_.empty() && pending_.front().not_before_ms <= ui.now_ms() && (!sequential || requests_.empty())) {
+        const std::string sec_prov = pending_.front().provider;
         const int index = pending_.front().index;
         pending_.pop_front();
-        request_section(ui, index);
+        request_section_for(ui, sec_prov, index);
     }
     if (ui.now_ms() - last_clock_ms_ > 10000) {
         last_clock_ms_ = ui.now_ms();
@@ -317,20 +378,47 @@ void HomeScreen::update(Ui &ui, float dt) {
     }
 }
 
-HomeScreen::Row &HomeScreen::row_for(const std::string &name, bool horizontal) {
-    for (auto &r : rows_) if (r->name == name) return *r;
+void HomeScreen::set_type_filter(Ui &, const std::string &type) {
+    if (type_filter_ == type) return;
+    type_filter_ = type;
+    // Rebuild filter chips (update checkmarks)
+    size_t ci = 0;
+    for (const auto &child_ptr : type_chips_row_->children()) {
+        if (auto *btn = dynamic_cast<PillButton *>(child_ptr.get())) {
+            const std::string names[] = {"", "Movie", "TvSeries", "Anime", "Live"};
+            if (ci < 5) btn->set_icon(type_filter_ == names[ci] ? "check" : "");
+            ci++;
+        }
+    }
+    // Re-filter all existing rows
+    for (auto &row : rows_) rebuild_row(*row);
+}
+
+HomeScreen::Row &HomeScreen::row_for(const std::string &name, const std::string &row_provider, bool horizontal) {
+    const std::string key = row_provider + "|" + name;
+    for (auto &r : rows_) if (r->name == key) return *r;
     auto row = std::make_unique<Row>();
-    row->name = name;
+    row->name = key;
+    row->provider = row_provider;
     row->horizontal = horizontal;
-    row->title = &rows_box_->add<Label>(name.empty() ? provider_ : name);
+    std::string title_text = name.empty() ? row_provider : name;
+    if (all_mode_ && !row_provider.empty())
+        title_text = row_provider + (name.empty() ? "" : "  ·  " + name);
+    row->title = &rows_box_->add<Label>(title_text);
     row->title->set_bold(true).set_font_size(theme::kHeadline);
     const wnk::Size cell = horizontal ? kStillCell : kPosterCell;
     row->rail = &rows_box_->add<CollectionView>(Axis::Horizontal, 1, cell, 28);
     row->rail->set_width(Dim::fill());
     row->rail->set_height(Dim::fixed(cell.h + 40));
     Row *raw = row.get();
-    row->rail->on_activate = [this, raw](Ui &ui, size_t i) {
-        if (i < raw->items.size()) s_.router->open_details(ui, provider_, raw->items[i]);
+    row->rail->on_activate = [this, raw](Ui &ui, size_t vi) {
+        if (vi >= raw->filtered.size()) return;
+        size_t i = raw->filtered[vi];
+        if (i >= raw->items.size()) return;
+        const auto &it = raw->items[i];
+        const std::string &prov = !it.api_name.empty() ? it.api_name
+                                : !raw->provider.empty() ? raw->provider : provider_;
+        s_.router->open_details(ui, prov, it);
     };
     rows_.push_back(std::move(row));
     return *rows_.back();
@@ -338,27 +426,36 @@ HomeScreen::Row &HomeScreen::row_for(const std::string &name, bool horizontal) {
 
 void HomeScreen::rebuild_row(Row &row) {
     Row *raw = &row;
-    row.rail->set_items(row.items.size(), [raw](Ui &, size_t i) {
-        const auto &it = raw->items[i];
-        auto card = std::make_unique<Card>(it.name, it.poster_url, it.year > 0 ? std::to_string(it.year) : std::string());
+    const std::string filter = type_filter_;
+    raw->filtered.clear();
+    for (size_t i = 0; i < row.items.size(); i++) {
+        if (!filter.empty() && row.items[i].type != filter) continue;
+        raw->filtered.push_back(i);
+    }
+    const bool any = !raw->filtered.empty();
+    row.title->set_visible(any);
+    row.rail->set_visible(any);
+    row.rail->set_items(raw->filtered.size(), [raw](Ui &, size_t vi) {
+        const auto &it = raw->items[raw->filtered[vi]];
+        std::string sub = it.year > 0 ? std::to_string(it.year) : std::string();
+        const std::string qd = quality_display(it.quality);
+        if (!qd.empty()) { if (!sub.empty()) sub += " · "; sub += qd; }
+        auto card = std::make_unique<Card>(it.name, it.poster_url, sub);
         card->image_aspect = raw->horizontal ? 9.0f / 16.0f : 1.5f;
         return card;
     });
 }
 
-void HomeScreen::request_section(Ui &, int index) {
-    const std::string provider = provider_;
-    // One request answers one MainPageData; its HomePageResponse may hold several HomePageLists, each
-    // a row of its own (a "section" event starts each).
+void HomeScreen::request_section_for(Ui &, const std::string &section_provider, int index) {
     struct List {
         std::string name;
         bool horizontal = false;
         std::vector<runtime::SearchResult> items;
     };
     auto acc = std::make_shared<std::vector<List>>();
-    auto empty = std::make_shared<bool>(false);  // the provider answered with nothing ("empty", "unsupported")
-    const runtime::Provider *p = s_.plugins->provider(provider);
-    nlohmann::json req = {{"op", "mainpage"}, {"provider", provider}, {"section", index}, {"page", 1}, {"limit", 60}};
+    auto empty = std::make_shared<bool>(false);
+    const runtime::Provider *p = s_.plugins->provider(section_provider);
+    nlohmann::json req = {{"op", "mainpage"}, {"provider", section_provider}, {"section", index}, {"page", 1}, {"limit", 60}};
     if (p && p->main_page_timeout_ms > 0) req["timeout"] = (p->main_page_timeout_ms + 999) / 1000;
     auto id = std::make_shared<runtime::RuntimeClient::RequestId>(0);
     *id = s_.runtime->request(
@@ -377,27 +474,25 @@ void HomeScreen::request_section(Ui &, int index) {
                 acc->back().items.push_back(runtime::parse_search_result(e));
             }
         },
-        core::guarded(life_.weak(), [this, acc, empty, provider, index, id](bool ok, const std::string &error) {
+        core::guarded(life_.weak(), [this, acc, empty, section_provider, index, id](bool ok, const std::string &error) {
             requests_.erase(std::remove(requests_.begin(), requests_.end(), *id), requests_.end());
-            if (provider != provider_) return;
+            // In All mode, provider_ is kAllProvider; individual section providers are always valid
+            if (!all_mode_ && section_provider != provider_) return;
             size_t items = 0;
             for (const List &l : *acc) items += l.items.size();
             if (!ok && items == 0) {
-                // CloudStream leaves empty sections out; a cancelled one was replaced (a chip, a new source).
-                if (*empty) WNK_LOGI(kCat, "home: section %d empty", index);
-                else if (error == runtime::kCancelledByApp) WNK_LOGD(kCat, "home: section %d cancelled", index);
-                else WNK_LOGW(kCat, "home: section %d failed: %s", index, error.c_str());
+                if (*empty) WNK_LOGI(kCat, "home: %s section %d empty", section_provider.c_str(), index);
+                else if (error == runtime::kCancelledByApp) WNK_LOGD(kCat, "home: %s section %d cancelled", section_provider.c_str(), index);
+                else WNK_LOGW(kCat, "home: %s section %d failed: %s", section_provider.c_str(), index, error.c_str());
             }
             if (items > 0 && !first_row_logged_) {
-                // Start-up measurements (docs/performance.md): when Home has something to show.
                 first_row_logged_ = true;
-                if (Ui *u = this->ui()) {
+                if (Ui *u = this->ui())
                     WNK_LOGI(kCat, "home: first row after %.0f ms", u->now_ms() - requested_ms_);
-                }
             }
             for (List &l : *acc) {
                 if (l.items.empty()) continue;
-                Row &row = row_for(l.name, l.horizontal);
+                Row &row = row_for(l.name, section_provider, l.horizontal);
                 for (auto &it : l.items) row.items.push_back(std::move(it));
                 rebuild_row(row);
             }
@@ -503,6 +598,11 @@ void HomeScreen::open_provider_picker(Ui &ui) {
     // picks one now and stores that provider.
     auto choose = [this, dlg](const std::string &value) {
         return [this, dlg, value](Ui &ui) {
+            if (value == kAllProvider) {
+                dlg->dismiss(ui);
+                load(ui, kAllProvider);
+                return;
+            }
             const std::string name = value == kRandomProvider ? random_provider() : value;
             s_.settings->set(kHomeProvider, name.empty() ? std::string(kNoneProvider) : name);
             dlg->dismiss(ui);
@@ -519,7 +619,8 @@ void HomeScreen::open_provider_picker(Ui &ui) {
             if (chosen) *current = &b;
             return &b;
         };
-        tile("None", "", kNoneProvider, provider_.empty());
+        tile("★ All Providers", "play", kAllProvider, all_mode_);
+        tile("None", "", kNoneProvider, provider_.empty() && !all_mode_);
         tile("Random", "refresh", kRandomProvider, false);
         // Then the providers by lower-case name (pinned providers are not built).
         const auto providers = settings::home_providers(valid, types);

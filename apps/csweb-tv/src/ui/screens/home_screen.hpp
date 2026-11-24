@@ -41,12 +41,15 @@ class HomeScreen : public wnk::ui::Screen {
  private:
     struct Row {
         std::string name;
+        std::string provider;   // which provider owns this row (for All mode)
         bool horizontal = false;
         std::vector<runtime::SearchResult> items;
+        std::vector<size_t> filtered;           // indices into items after type filter
         wnk::ui::Label *title = nullptr;
         wnk::ui::CollectionView *rail = nullptr;
     };
     struct PendingSection {
+        std::string provider;   // explicit provider (empty = use provider_)
         int index;
         double not_before_ms;
     };
@@ -55,17 +58,18 @@ class HomeScreen : public wnk::ui::Screen {
     std::string chosen_provider() const;
     std::string random_provider() const;
     void load(wnk::ui::Ui &ui, const std::string &provider);
-    void request_section(wnk::ui::Ui &ui, int index);
-    Row &row_for(const std::string &name, bool horizontal);
+    void request_section_for(wnk::ui::Ui &ui, const std::string &section_provider, int index);
+    Row &row_for(const std::string &name, const std::string &row_provider, bool horizontal);
     void rebuild_row(Row &row);
     void pick_hero();
     void show_hero(const runtime::Details &d);
     void set_banner(bool shown);
-    void open_provider_picker(wnk::ui::Ui &ui);
     enum class StateAction { None, Extensions, ChooseSource };
     void set_state_text(const std::string &text, StateAction action);
     void cancel_requests();
     void rebuild_resume();
+    void set_type_filter(wnk::ui::Ui &ui, const std::string &type);
+    void open_provider_picker(wnk::ui::Ui &ui);
     // "Because you watched …" (issue #37): the most recent Continue watching show's recommendations
     // (its LoadResponse.recommendations, from its own provider), loaded once per show.
     void update_because();
@@ -106,10 +110,14 @@ class HomeScreen : public wnk::ui::Screen {
     bool because_loading_ = false;
     std::vector<library::Resume> resume_;
     core::Signal::Subscription library_sub_;
-    core::Signal::Subscription profile_sub_;  // another profile: its home source
+    core::Signal::Subscription profile_sub_;
     core::Signal::Subscription plugins_sub_;
     double last_clock_ms_ = -1e9;
     wnk::async::Lifetime life_;  // destroyed first: late runtime answers find the screen gone
+    // Type filter ("" = all) and All-providers mode
+    std::string type_filter_;
+    bool all_mode_ = false;      // true when kAllProvider is active
+    wnk::ui::Row *type_chips_row_ = nullptr;
 };
 
 }  // namespace csweb::ui
