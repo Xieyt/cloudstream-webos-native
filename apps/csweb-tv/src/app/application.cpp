@@ -211,6 +211,10 @@ void Application::on_start(wnk::app::Context &ctx) {
 
 void Application::on_frame(wnk::app::Context &ctx, float dt) {
     if (!pending_install_.empty() && !installing_) run_installs();
+    if (!pending_uninstall_.empty() && !uninstalling_ && plugins_ && plugins_->started()) {
+        uninstalling_ = true;
+        uninstall_next();
+    }
     since_data_save_s_ += dt;
     if (since_data_save_s_ < 300) return;
     since_data_save_s_ = 0;
