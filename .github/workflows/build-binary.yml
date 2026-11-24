@@ -26,7 +26,7 @@ jobs:
         env:
           WEBOS_NDK: ${{ env.WEBOS_NDK }}
         run: |
-          cmake --preset webos-release \
+          cmake --preset webos-release -B build/webos-legacy \
             -DWNK_EXTRA_APP_DIRS="$GITHUB_WORKSPACE/apps/csweb-tv" \
             -DCSWEB_LEGACY=ON \
             -DWNK_BUILD_TESTS=OFF
