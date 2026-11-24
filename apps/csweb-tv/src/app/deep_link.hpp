@@ -6,12 +6,14 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace csweb::app {
 
 struct DeepLink {
-    enum class Kind { None, Repository, Search } kind = Kind::None;
-    std::string value;  // Repository: the https URL; Search: the decoded query
+    enum class Kind { None, Repository, Search, Install } kind = Kind::None;
+    std::string value;                // Repository: the https URL; Search: the decoded query
+    std::vector<std::string> names;   // Install: plugin internal names (launch param "install")
 };
 
 // `params_json`: the launch parameters object ("{}" or empty when there are none).

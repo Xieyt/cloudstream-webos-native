@@ -209,6 +209,7 @@ void Application::on_start(wnk::app::Context &ctx) {
 }
 
 void Application::on_frame(wnk::app::Context &ctx, float dt) {
+    if (!pending_install_.empty() && !installing_) run_installs();
     since_data_save_s_ += dt;
     if (since_data_save_s_ < 300) return;
     since_data_save_s_ = 0;
@@ -230,7 +231,77 @@ void Application::open_link(wnk::ui::Ui &ui, const std::string &params_json) {
     } else if (link.kind == DeepLink::Kind::Repository) {
         pending_repo_ = link.value;
         run_pending_search(ui);
+    } else if (link.kind == DeepLink::Kind::Install) {
+        for (const auto &n : link.names) pending_install_.push_back(n);
+        WNK_LOGI(kCat, "install: %zu queued", link.names.size());
+        run_installs();
     }
+}
+
+// The plugin lists of every added repository, fetched once: internal name -> newest version.
+void Application::load_catalog(std::function<void()> then) {
+    if (catalog_ready_) {
+        then();
+        return;
+    }
+    const std::vector<plugins::RepositoryData> repos = plugins_->repositories();
+    if (repos.empty()) {
+        catalog_ready_ = true;
+        then();
+        return;
+    }
+    auto left = std::make_shared<size_t>(repos.size());
+    auto done = std::make_shared<std::function<void()>>(std::move(then));
+    for (const auto &repo : repos) {
+        plugins_->fetch_plugins(repo, core::guarded(life_.weak(), [this, repo, left, done](
+                                          bool ok, const std::string &, std::vector<plugins::SitePlugin> list) {
+            if (ok) {
+                for (auto &p : list) {
+                    auto it = catalog_.find(p.internal_name);
+                    if (it == catalog_.end() || p.version > it->second.plugin.version) catalog_[p.internal_name] = {repo, p};
+                }
+            }
+            if (--*left == 0) {
+                catalog_ready_ = true;
+                WNK_LOGI(kCat, "install: catalog of %zu plugins", catalog_.size());
+                (*done)();
+            }
+        }));
+    }
+}
+
+void Application::run_installs() {
+    if (installing_ || pending_install_.empty() || !plugins_ || !plugins_->started()) return;
+    installing_ = true;
+    load_catalog([this] { install_next(); });
+}
+
+// One at a time: each plugin is downloaded, checked and loaded before the next starts.
+void Application::install_next() {
+    if (pending_install_.empty()) {
+        installing_ = false;
+        WNK_LOGI(kCat, "install: queue done, %zu plugins installed", plugins_->installed().size());
+        return;
+    }
+    const std::string name = std::move(pending_install_.front());
+    pending_install_.pop_front();
+    const auto it = catalog_.find(name);
+    if (it == catalog_.end()) {
+        WNK_LOGW(kCat, "install: %s is in no repository", name.c_str());
+        install_next();
+        return;
+    }
+    if (plugins_->installed_plugin(it->second.repo.url, it->second.plugin.internal_name)) {
+        WNK_LOGI(kCat, "install: %s already installed", name.c_str());
+        install_next();
+        return;
+    }
+    plugins_->install(it->second.repo, it->second.plugin,
+                      core::guarded(life_.weak(), [this, name](bool ok, const std::string &error) {
+                          if (ok) WNK_LOGI(kCat, "install: %s ok", name.c_str());
+                          else WNK_LOGW(kCat, "install: %s failed: %s", name.c_str(), error.c_str());
+                          install_next();
+                      }));
 }
 
 void Application::add_repository_from_link(wnk::ui::Ui &ui, const std::string &url) {

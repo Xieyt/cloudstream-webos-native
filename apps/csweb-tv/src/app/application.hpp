@@ -17,6 +17,9 @@
 
 #include "wnk/app/app.hpp"
 
+#include <deque>
+#include <functional>
+#include <map>
 #include <memory>
 
 namespace csweb::app {
@@ -52,6 +55,19 @@ class Application : public wnk::app::Delegate {
     std::string pending_search_;  // a cloudstreamsearch:// query waiting for the plugins to load
     bool choosing_profile_ = false;  // the start-up profile picker is open
     std::string pending_repo_;    // a repository link waiting for the stored repositories to be read
+    // Scripted installs ({"install": [...]} launch param): names queue up, the repositories' plugin
+    // lists are fetched once into catalog_, then plugins install one at a time.
+    struct CatalogEntry {
+        plugins::RepositoryData repo;
+        plugins::SitePlugin plugin;
+    };
+    std::deque<std::string> pending_install_;
+    std::map<std::string, CatalogEntry> catalog_;  // internal name -> newest version in any repository
+    bool catalog_ready_ = false;
+    bool installing_ = false;
+    void run_installs();
+    void load_catalog(std::function<void()> then);
+    void install_next();
     core::Signal::Subscription plugins_sub_;
     double since_data_save_s_ = 0;
     wnk::async::Lifetime life_;
