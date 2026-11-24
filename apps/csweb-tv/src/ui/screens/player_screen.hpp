@@ -155,8 +155,8 @@ class PlayerScreen : public wnk::ui::Screen {
     wnk::ui::Label *torrent_info_ = nullptr;
     double torrent_polled_ms_ = 0;
     bool torrent_polling_ = false;
-    // Quality filter: 0 = all, else minimum quality value (720, 1080, 2160)
-    int quality_filter_ = 0;
+    // Quality filter: 0 = all, else minimum quality value (720, 1080, 2160). Default 1080p+.
+    int quality_filter_ = 1080;
     // Reachability: index → 1 (ok), 0 (dead), -1 (in-progress). Absent = unchecked.
     std::unordered_map<size_t, int8_t> link_reachable_;
 };
