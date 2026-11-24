@@ -250,8 +250,8 @@ void PlayerScreen::links_changed() {
     if (!started_ && auto_skip) {
         if (Ui *u = this->ui()) start_best(*u);
     }
-    // Start a background HEAD check for the newest link so results are ready when Sources opens.
-    if (!links_.empty()) check_reachability(links_.size() - 1);
+    // Reachability checks run lazily when Sources dialog opens — not here,
+    // to avoid flooding the network with HEAD requests during link loading.
 }
 
 void PlayerScreen::check_reachability(size_t i) {
@@ -811,11 +811,15 @@ void PlayerScreen::open_sources(Ui &ui) {
         } else if (errored_.count(i)) {
             text += "  ·  failed";
         } else {
-            // Reachability indicator
+            // Reachability: cap to 3 concurrent probes — avoids network congestion during link loading.
             auto it = link_reachable_.find(i);
-            if (it == link_reachable_.end() || it->second == -1) {
-                text += "  ·  …";          // in-progress or unchecked
-                check_reachability(i);     // idempotent — won't double-check
+            const size_t in_flight = std::count_if(link_reachable_.begin(), link_reachable_.end(),
+                                                   [](const auto &kv) { return kv.second == -1; });
+            if (it == link_reachable_.end()) {
+                if (in_flight < 3) { text += "  ·  …"; check_reachability(i); }
+                // else: skip for now; shown without badge
+            } else if (it->second == -1) {
+                text += "  ·  …";
             } else if (it->second > 0) {
                 text += "  ·  ✓";
             } else {
