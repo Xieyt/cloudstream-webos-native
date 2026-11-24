@@ -3,6 +3,7 @@
 
 #include "app/deep_link.hpp"
 #include "core/core_dumps.hpp"
+#include "core/guard.hpp"
 #include "player/link_priority.hpp"
 #include "runtime/network_settings.hpp"
 #include "runtime/runtime_launcher.hpp"
