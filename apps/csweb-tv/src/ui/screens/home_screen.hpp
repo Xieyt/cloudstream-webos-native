@@ -69,6 +69,9 @@ class HomeScreen : public wnk::ui::Screen {
     void cancel_requests();
     void rebuild_resume();
     void set_type_filter(wnk::ui::Ui &ui, const std::string &type);
+    void set_quality_filter(wnk::ui::Ui &ui, int min_rank);
+    void set_provider_filter(wnk::ui::Ui &ui, const std::string &name);
+    void build_provider_chips();
     void open_provider_picker(wnk::ui::Ui &ui);
     // "Because you watched …" (issue #37): the most recent Continue watching show's recommendations
     // (its LoadResponse.recommendations, from its own provider), loaded once per show.
@@ -118,6 +121,10 @@ class HomeScreen : public wnk::ui::Screen {
     std::string type_filter_;
     bool all_mode_ = false;      // true when kAllProvider is active
     wnk::ui::Row *type_chips_row_ = nullptr;
+    wnk::ui::Row *quality_chips_row_ = nullptr;
+    wnk::ui::Row *provider_chips_row_ = nullptr;
+    int quality_min_ = 0;            // 0 any, 3 HD+, 4 FHD+, 5 4K
+    std::string provider_filter_;    // "" = all sources (★ All mode)
 };
 
 }  // namespace csweb::ui

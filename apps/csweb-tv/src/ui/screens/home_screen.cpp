@@ -62,6 +62,16 @@ std::string quality_display(const std::string &q) {
         lq == "telesync" || lq == "telecine")        return "CAM";
     return {};  // unknown — don't show
 }
+
+// Order of quality_display() badges; 0 = unknown (never filtered out).
+int quality_rank(const std::string &badge) {
+    if (badge == "CAM") return 1;
+    if (badge == "SD") return 2;
+    if (badge == "HD") return 3;
+    if (badge == "FHD") return 4;
+    if (badge == "4K" || badge == "HDR") return 5;
+    return 0;
+}
 }  // namespace
 
 HomeScreen::HomeScreen(app::Services &s) : Screen("Home"), s_(s) {
@@ -176,6 +186,20 @@ HomeScreen::HomeScreen(app::Services &s) : Screen("Home"), s_(s) {
             [this, t](Ui &u) { set_type_filter(u, t); }, 44);
         btn.name = std::string("home.filter.") + (t[0] ? t : "all");
     }
+    // Quality filter chips: Any / HD+ / FHD+ / 4K (unknown-quality items always pass)
+    quality_chips_row_ = &content_->add<wnk::ui::Row>(8);
+    quality_chips_row_->set_padding({0, 0, 0, 4});
+    struct QChip { const char *label; int min; };
+    for (auto [label, min] : {QChip{"Any quality", 0}, {"HD+", 3}, {"FHD+", 4}, {"4K", 5}}) {
+        const int m = min;
+        auto &btn = quality_chips_row_->add<PillButton>(label, m == 0 ? "check" : "", PillButton::Style::Glass,
+                                                        [this, m](Ui &u) { set_quality_filter(u, m); }, 44);
+        btn.name = "home.quality." + std::to_string(m);
+    }
+    // Provider chips (rebuilt on load; only shown in ★ All mode)
+    provider_chips_row_ = &content_->add<wnk::ui::Row>(8);
+    provider_chips_row_->set_padding({0, 0, 0, 4});
+    provider_chips_row_->set_visible(false);
 
     rows_box_ = &content_->add<Column>(26);
 
@@ -321,6 +345,8 @@ void HomeScreen::load(Ui &ui, const std::string &provider) {
     backdrop_->set_url({});
     provider_ = provider;
     all_mode_ = (provider == kAllProvider);
+    provider_filter_.clear();
+    build_provider_chips();
     provider_button_->set_text(all_mode_ ? "★ All" : (provider.empty() ? "Source: none" : provider));
     if (provider.empty()) {
         set_state_text("Choose the source shown here, or use Search.", StateAction::ChooseSource);
@@ -394,6 +420,46 @@ void HomeScreen::set_type_filter(Ui &, const std::string &type) {
     for (auto &row : rows_) rebuild_row(*row);
 }
 
+void HomeScreen::set_quality_filter(Ui &, int min_rank) {
+    if (quality_min_ == min_rank) return;
+    quality_min_ = min_rank;
+    const int ranks[] = {0, 3, 4, 5};
+    size_t ci = 0;
+    for (const auto &c : quality_chips_row_->children()) {
+        if (auto *btn = dynamic_cast<PillButton *>(c.get()))
+            if (ci < 4) btn->set_icon(quality_min_ == ranks[ci++] ? "check" : "");
+    }
+    for (auto &row : rows_) rebuild_row(*row);
+}
+
+void HomeScreen::set_provider_filter(Ui &, const std::string &name) {
+    if (provider_filter_ == name) return;
+    provider_filter_ = name;
+    for (const auto &c : provider_chips_row_->children()) {
+        if (auto *btn = dynamic_cast<PillButton *>(c.get()))
+            btn->set_icon(btn->name == "home.provider." + name ? "check" : "");
+    }
+    for (auto &row : rows_) rebuild_row(*row);
+}
+
+// One chip per provider with a home page, only in ★ All mode. [All sources] clears the filter.
+void HomeScreen::build_provider_chips() {
+    provider_chips_row_->clear_children();
+    provider_chips_row_->set_visible(all_mode_);
+    if (!all_mode_) return;
+    auto add = [this](const std::string &label, const std::string &value) {
+        auto &b = provider_chips_row_->add<PillButton>(label, value.empty() ? "check" : "", PillButton::Style::Glass,
+                                                       [this, value](Ui &u) { set_provider_filter(u, value); }, 44);
+        b.name = "home.provider." + value;
+    };
+    add("All sources", "");
+    const auto valid = settings::preferred_providers(s_.plugins->providers(), settings::read_filters(*s_.settings), true);
+    for (const auto &e : valid) {
+        const runtime::Provider *pp = s_.plugins->provider(e.name);
+        if (pp && pp->has_main_page && !pp->main_page.empty()) add(e.name, e.name);
+    }
+}
+
 HomeScreen::Row &HomeScreen::row_for(const std::string &name, const std::string &row_provider, bool horizontal) {
     const std::string key = row_provider + "|" + name;
     for (auto &r : rows_) if (r->name == key) return *r;
@@ -426,10 +492,14 @@ HomeScreen::Row &HomeScreen::row_for(const std::string &name, const std::string 
 
 void HomeScreen::rebuild_row(Row &row) {
     Row *raw = &row;
-    const std::string filter = type_filter_;
     raw->filtered.clear();
-    for (size_t i = 0; i < row.items.size(); i++) {
-        if (!filter.empty() && row.items[i].type != filter) continue;
+    const bool provider_ok = provider_filter_.empty() || row.provider == provider_filter_;
+    for (size_t i = 0; provider_ok && i < row.items.size(); i++) {
+        const auto &it = row.items[i];
+        if (!type_filter_.empty() && it.type != type_filter_) continue;
+        // Quality: items whose provider reports no quality always pass (unknown is not "bad").
+        const int qr = quality_rank(quality_display(it.quality));
+        if (quality_min_ > 0 && qr > 0 && qr < quality_min_) continue;
         raw->filtered.push_back(i);
     }
     const bool any = !raw->filtered.empty();
