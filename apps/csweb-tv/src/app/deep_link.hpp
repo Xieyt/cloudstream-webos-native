@@ -11,9 +11,9 @@
 namespace csweb::app {
 
 struct DeepLink {
-    enum class Kind { None, Repository, Search, Install } kind = Kind::None;
+    enum class Kind { None, Repository, Search, Install, Uninstall } kind = Kind::None;
     std::string value;                // Repository: the https URL; Search: the decoded query
-    std::vector<std::string> names;   // Install: plugin internal names (launch param "install")
+    std::vector<std::string> names;   // Install/Uninstall: plugin internal names (launch params "install"/"uninstall")
 };
 
 // `params_json`: the launch parameters object ("{}" or empty when there are none).

@@ -29,12 +29,15 @@ DeepLink parse_deep_link(const std::string &params_json) {
     if (!j.is_object()) return link;
     // {"install": "Name"} or {"install": ["A","B"]}: install plugins by internal name from the added
     // repositories (lets a script drive installs through luna-send applicationManager/launch).
-    if (auto it = j.find("install"); it != j.end()) {
+    for (const auto &[key, kind] : {std::pair{"install", DeepLink::Kind::Install},
+                                    std::pair{"uninstall", DeepLink::Kind::Uninstall}}) {
+        auto it = j.find(key);
+        if (it == j.end()) continue;
         if (it->is_string()) link.names.push_back(it->get<std::string>());
         else if (it->is_array())
             for (const auto &n : *it)
                 if (n.is_string()) link.names.push_back(n.get<std::string>());
-        if (!link.names.empty()) link.kind = DeepLink::Kind::Install;
+        if (!link.names.empty()) link.kind = kind;
         return link;
     }
     std::string str;

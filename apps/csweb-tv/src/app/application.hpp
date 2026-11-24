@@ -68,6 +68,9 @@ class Application : public wnk::app::Delegate {
     void run_installs();
     void load_catalog(std::function<void()> then);
     void install_next();
+    std::deque<std::string> pending_uninstall_;
+    bool uninstalling_ = false;
+    void uninstall_next();
     core::Signal::Subscription plugins_sub_;
     double since_data_save_s_ = 0;
     wnk::async::Lifetime life_;

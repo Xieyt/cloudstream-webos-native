@@ -236,6 +236,13 @@ void Application::open_link(wnk::ui::Ui &ui, const std::string &params_json) {
         for (const auto &n : link.names) pending_install_.push_back(n);
         WNK_LOGI(kCat, "install: %zu queued", link.names.size());
         run_installs();
+    } else if (link.kind == DeepLink::Kind::Uninstall) {
+        for (const auto &n : link.names) pending_uninstall_.push_back(n);
+        WNK_LOGI(kCat, "uninstall: %zu queued", link.names.size());
+        if (!uninstalling_ && plugins_ && plugins_->started()) {
+            uninstalling_ = true;
+            uninstall_next();
+        }
     }
 }
 
@@ -275,6 +282,31 @@ void Application::run_installs() {
     if (installing_ || pending_install_.empty() || !plugins_ || !plugins_->started()) return;
     installing_ = true;
     load_catalog([this] { install_next(); });
+}
+
+// {"uninstall": [...]}: remove plugins by internal name, one at a time (frees their memory at the
+// next start). Names that are not installed are reported and skipped.
+void Application::uninstall_next() {
+    if (pending_uninstall_.empty()) {
+        uninstalling_ = false;
+        WNK_LOGI(kCat, "uninstall: queue done, %zu plugins installed", plugins_->installed().size());
+        return;
+    }
+    const std::string name = std::move(pending_uninstall_.front());
+    pending_uninstall_.pop_front();
+    std::string id;
+    for (const auto &p : plugins_->installed())
+        if (p.internal_name == name) id = p.id;
+    if (id.empty()) {
+        WNK_LOGW(kCat, "uninstall: %s is not installed", name.c_str());
+        uninstall_next();
+        return;
+    }
+    plugins_->uninstall(id, core::guarded(life_.weak(), [this, name](bool ok, const std::string &error) {
+        if (ok) WNK_LOGI(kCat, "uninstall: %s ok", name.c_str());
+        else WNK_LOGW(kCat, "uninstall: %s failed: %s", name.c_str(), error.c_str());
+        uninstall_next();
+    }));
 }
 
 // One at a time: each plugin is downloaded, checked and loaded before the next starts.

@@ -8,6 +8,7 @@
 #include "ui/widgets/art.hpp"
 #include "ui/widgets/glass_dialog.hpp"
 #include "ui/widgets/pill_button.hpp"
+#include "ui/widgets/quality_badge.hpp"
 #include "ui/widgets/top_bar.hpp"
 #include "ui/widgets/type_chips.hpp"
 
@@ -72,6 +73,60 @@ int quality_rank(const std::string &badge) {
     if (badge == "4K" || badge == "HDR") return 5;
     return 0;
 }
+
+QualityBadge::Kind quality_kind(const std::string &badge) {
+    if (badge == "4K" || badge == "HDR") return QualityBadge::Kind::Quality4K;
+    if (badge == "FHD") return QualityBadge::Kind::Quality1080p;
+    if (badge == "HD") return QualityBadge::Kind::Quality720p;
+    return QualityBadge::Kind::QualityGeneric;
+}
+
+// CloudStream TvType -> a short label for the poster ("" = no badge).
+std::string type_badge(const std::string &type) {
+    if (type == "Movie") return "MOVIE";
+    if (type == "TvSeries") return "SERIES";
+    if (type == "Anime" || type == "AnimeMovie" || type == "OVA") return "ANIME";
+    if (type == "Live") return "LIVE";
+    if (type == "Cartoon") return "TOON";
+    if (type == "Documentary") return "DOC";
+    if (type == "AsianDrama") return "DRAMA";
+    return {};
+}
+
+// A poster card with badges over the artwork: quality top-left, type top-right and, in the All
+// view, the source it came from bottom-left. A badge is left out when its text is empty.
+class BadgeCard : public Card {
+ public:
+    BadgeCard(std::string title, std::string image_url, std::string subtitle, const std::string &quality,
+              const std::string &type, const std::string &provider)
+        : Card(std::move(title), std::move(image_url), std::move(subtitle)) {
+        if (!quality.empty()) quality_ = &add<QualityBadge>(quality, quality_kind(quality), 18.0f);
+        if (const std::string t = type_badge(type); !t.empty())
+            type_ = &add<QualityBadge>(t, QualityBadge::Kind::QualityGeneric, 15.0f);
+        if (!provider.empty()) source_ = &add<QualityBadge>(provider, QualityBadge::Kind::QualityGeneric, 15.0f);
+    }
+
+ protected:
+    void layout_content(Ui &ui, const wnk::Rect &c) override {
+        Card::layout_content(ui, c);
+        const wnk::Rect img = image().frame();
+        constexpr float kMargin = 8, kHuge = 100000;
+        auto place = [&](QualityBadge *b, bool right, bool bottom) {
+            if (!b) return;
+            wnk::Size s = b->measure(ui, {kHuge, kHuge});
+            s.w = std::min(s.w, img.w - 2 * kMargin);
+            const float x = right ? img.x + img.w - s.w - kMargin : img.x + kMargin;
+            const float y = bottom ? img.y + img.h - s.h - kMargin : img.y + kMargin;
+            b->layout(ui, {x, y, s.w, s.h});
+        };
+        place(quality_, false, false);
+        place(type_, true, false);
+        place(source_, false, true);
+    }
+
+ private:
+    QualityBadge *quality_ = nullptr, *type_ = nullptr, *source_ = nullptr;
+};
 }  // namespace
 
 HomeScreen::HomeScreen(app::Services &s) : Screen("Home"), s_(s) {
@@ -505,12 +560,12 @@ void HomeScreen::rebuild_row(Row &row) {
     const bool any = !raw->filtered.empty();
     row.title->set_visible(any);
     row.rail->set_visible(any);
-    row.rail->set_items(raw->filtered.size(), [raw](Ui &, size_t vi) {
+    const bool show_provider = all_mode_;
+    row.rail->set_items(raw->filtered.size(), [raw, show_provider](Ui &, size_t vi) {
         const auto &it = raw->items[raw->filtered[vi]];
-        std::string sub = it.year > 0 ? std::to_string(it.year) : std::string();
-        const std::string qd = quality_display(it.quality);
-        if (!qd.empty()) { if (!sub.empty()) sub += " · "; sub += qd; }
-        auto card = std::make_unique<Card>(it.name, it.poster_url, sub);
+        const std::string sub = it.year > 0 ? std::to_string(it.year) : std::string();
+        auto card = std::make_unique<BadgeCard>(it.name, it.poster_url, sub, quality_display(it.quality), it.type,
+                                                show_provider ? raw->provider : std::string());
         card->image_aspect = raw->horizontal ? 9.0f / 16.0f : 1.5f;
         return card;
     });
@@ -550,6 +605,7 @@ void HomeScreen::request_section_for(Ui &, const std::string &section_provider, 
             if (!all_mode_ && section_provider != provider_) return;
             size_t items = 0;
             for (const List &l : *acc) items += l.items.size();
+            WNK_LOGI(kCat, "home-stat: %s section %d: %zu rows %zu items", section_provider.c_str(), index, acc->size(), items);
             if (!ok && items == 0) {
                 if (*empty) WNK_LOGI(kCat, "home: %s section %d empty", section_provider.c_str(), index);
                 else if (error == runtime::kCancelledByApp) WNK_LOGD(kCat, "home: %s section %d cancelled", section_provider.c_str(), index);
